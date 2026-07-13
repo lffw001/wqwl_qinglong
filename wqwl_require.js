@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+﻿const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -6,6 +6,96 @@ const http = require('http');
 const https = require('https');
 const { constants } = require('crypto');
 let message = "";
+
+// 默认请求超时（毫秒），防止代理/网络挂死导致任务永久阻塞；可用环境变量 wqwl_request_timeout 覆盖
+const DEFAULT_REQUEST_TIMEOUT = Number(process.env['wqwl_request_timeout']) || 30000;
+// 推送消息最大累积长度，防止几百号长跑时内存溢出被系统静默 kill
+const MAX_SEND_TEXT_LENGTH = 3 * 1024 * 1024;
+
+// 复用 Agent，避免每次请求 new Agent 导致连接/内存泄漏
+let _sharedHttpAgent = null;
+let _sharedHttpsAgent = null;
+const _proxyAgentCache = new Map();
+const MAX_PROXY_AGENT_CACHE = 50;
+
+function getSharedHttpAgent() {
+    if (!_sharedHttpAgent) {
+        _sharedHttpAgent = new http.Agent({
+            keepAlive: true,
+            maxSockets: 50,
+            maxFreeSockets: 10,
+            timeout: 60000,
+        });
+    }
+    return _sharedHttpAgent;
+}
+
+function getSharedHttpsAgent() {
+    if (!_sharedHttpsAgent) {
+        _sharedHttpsAgent = new https.Agent({
+            ciphers: 'DEFAULT@SECLEVEL=1',
+            secureOptions: constants.SSL_OP_LEGACY_SERVER_CONNECT,
+            minVersion: 'TLSv1',
+            maxVersion: 'TLSv1.2',
+            rejectUnauthorized: false,
+            keepAlive: true,
+            maxSockets: 50,
+            maxFreeSockets: 10,
+            timeout: 60000,
+        });
+    }
+    return _sharedHttpsAgent;
+}
+
+function getCachedProxyAgent(proxy, isHttps) {
+    const cacheKey = `${isHttps ? 'https' : 'http'}:${proxy}`;
+    if (_proxyAgentCache.has(cacheKey)) {
+        return _proxyAgentCache.get(cacheKey);
+    }
+    if (_proxyAgentCache.size >= MAX_PROXY_AGENT_CACHE) {
+        const oldestKey = _proxyAgentCache.keys().next().value;
+        const oldAgent = _proxyAgentCache.get(oldestKey);
+        if (oldAgent && typeof oldAgent.destroy === 'function') {
+            try { oldAgent.destroy(); } catch (_) { /* ignore */ }
+        }
+        _proxyAgentCache.delete(oldestKey);
+    }
+    let agent;
+    if (isHttps) {
+        const { HttpsProxyAgent } = require('https-proxy-agent');
+        agent = new HttpsProxyAgent(`http://${proxy}`, { keepAlive: true, maxSockets: 10 });
+    } else {
+        const { HttpProxyAgent } = require('http-proxy-agent');
+        agent = new HttpProxyAgent(`http://${proxy}`, { keepAlive: true, maxSockets: 10 });
+    }
+    _proxyAgentCache.set(cacheKey, agent);
+    return agent;
+}
+
+// 全局异常捕获，避免进程静默退出
+let _processHandlersRegistered = false;
+function registerProcessHandlers() {
+    if (_processHandlersRegistered) return;
+    _processHandlersRegistered = true;
+
+    process.on('unhandledRejection', (reason) => {
+        const detail = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+        console.error(`❌ [致命] 未捕获的Promise异常: ${detail}`);
+    });
+
+    process.on('uncaughtException', (err) => {
+        console.error(`❌ [致命] 未捕获的异常: ${err.stack || err.message}`);
+    });
+
+    process.on('SIGTERM', () => {
+        console.log('⚠️ 收到 SIGTERM 信号，脚本被外部终止（可能是青龙面板超时杀进程）');
+    });
+
+    process.on('SIGINT', () => {
+        console.log('⚠️ 收到 SIGINT 信号，脚本被手动中断');
+    });
+}
+registerProcessHandlers();
 //获取环境变量
 function checkEnv(userCookie) {
     try {
@@ -14,11 +104,19 @@ function checkEnv(userCookie) {
             console.log("🔔 还没开始已经结束!");
             process.exit(1);
         }
-        const envSplitor = ["&", "\n"];
-        //this.sendMessage(userCookie);
-        let userList = userCookie
-            .split(envSplitor.find((o) => userCookie.includes(o)) || "&")
-            .filter((n) => n);
+        // 先统一替换所有分隔符为 &，再统一分割
+        // 将 \n 替换成 &，然后按 & 分割
+        let unifiedStr = userCookie.replace(/\n/g, '&');
+
+        // 按 & 分割并过滤空值
+        let userList = unifiedStr
+            .split('&')
+            .map(item => item.trim())  // 去除首尾空格
+            .filter(item => item && item !== "");  // 过滤空字符串
+
+        // 去重（可选）
+        userList = [...new Set(userList)];
+
         if (!userList || userList.length === 0) {
             console.log("🔔 没配置环境变量就要跑脚本啊！！！");
             console.log("🔔 还没开始已经结束!");
@@ -88,8 +186,6 @@ function aesDecrypt(encryptedData, key, iv = '', cipher = 'aes-128-cbc', keyEnco
 
 
 async function request(options, proxy = '') {
-
-
     // 检查URL协议
     const isHttps = options.url.startsWith('https://');
     const isHttp = options.url.startsWith('http://');
@@ -99,81 +195,160 @@ async function request(options, proxy = '') {
         options.url = 'http://' + options.url;
     }
 
-    // 再次检查
-    const protocol = options.url.startsWith('https://') ? https : http;
-
+    const urlIsHttps = options.url.startsWith('https://');
     let agent;
-
-    if (options.url.startsWith('https://')) {
-        agent = new https.Agent({
-            ciphers: 'DEFAULT@SECLEVEL=1',
-            secureOptions: constants.SSL_OP_LEGACY_SERVER_CONNECT,
-            minVersion: 'TLSv1',
-            maxVersion: 'TLSv1.2',
-            rejectUnauthorized: false
-        });
-    } else {
-        // 对于HTTP，使用普通的http.Agent
-        agent = new http.Agent({ keepAlive: true });
-    }
 
     if (proxy) {
         try {
-            if (options.url.startsWith('https://')) {
-                const { HttpsProxyAgent } = require('https-proxy-agent');
-                agent = new HttpsProxyAgent(`http://${proxy}`);
-            } else {
-                const { HttpProxyAgent } = require('http-proxy-agent');
-                agent = new HttpProxyAgent(`http://${proxy}`);
-            }
+            agent = getCachedProxyAgent(proxy, urlIsHttps);
         } catch (e) {
-            console.log(`❌ 创建代理代理失败: ${e.message}`);
+            console.log(`❌ 创建代理失败: ${e.message}`);
+            agent = urlIsHttps ? getSharedHttpsAgent() : getSharedHttpAgent();
         }
+    } else {
+        agent = urlIsHttps ? getSharedHttpsAgent() : getSharedHttpAgent();
     }
 
     const config = {
         ...options,
-        httpsAgent: options.url.startsWith('https://') ? agent : undefined,
-        httpAgent: options.url.startsWith('http://') ? agent : undefined,
+        httpsAgent: urlIsHttps ? agent : undefined,
+        httpAgent: !urlIsHttps ? agent : undefined,
         validateStatus: () => true,
+        timeout: options.timeout ?? DEFAULT_REQUEST_TIMEOUT,
     };
 
     try {
         const response = await axios(config);
         return response.data;
     } catch (e) {
-        throw new Error(e.message);
+        const msg = e.code === 'ECONNABORTED'
+            ? `请求超时(${config.timeout}ms)`
+            : e.message;
+        throw new Error(msg);
     }
 }
 
-async function getProxy(index, url) {
+async function testProxyConnection(proxy) {
+    if (!proxy) return false;
+
+    try {
+        // 使用一个简单的测试URL来验证代理是否可用
+        const testUrl = 'http://httpbin.org/ip'; // 或者使用其他可靠的测试URL
+        const timeout = 5000; // 5秒超时
+
+        const response = await axios({
+            method: 'get',
+            url: testUrl,
+            proxy: {
+                host: proxy.split(':')[0],
+                port: parseInt(proxy.split(':')[1]),
+            },
+            timeout: timeout
+        });
+
+        // 检查是否返回了有效的IP信息
+        if (response.data && response.data.origin) {
+            //  console.log(`代理 ${proxy} 测试通过，当前IP: ${response.data.origin}`);
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.error(`代理 ${proxy} 测试失败: ${error.message}`);
+        return false;
+    }
+}
+
+async function getProxy(index, url, maxRetries = 5) {
     const config = {
         method: 'get',
-        url: url || process.env['wqwl_daili']
+        url: url || process.env['wqwl_daili'],
+        timeout: DEFAULT_REQUEST_TIMEOUT,
     };
 
-    let retries = 3;
+    let retries = 0;
     let lastError;
+    let proxy = '';
 
-    for (let attempt = 1; attempt <= retries; attempt++) {
+    while (retries < maxRetries) {
         try {
+            console.log(`账号[${index + 1}]: 正在获取代理 (尝试 ${retries + 1}/${maxRetries})...`);
+
+            // 获取代理
             const response = await axios(config);
-            //console.log(`账号[${index + 1}]: 获取到的代理✅： ${response.data.trim()}`);
-            return response.data.trim(); // 返回代理 IP:端口
+            proxy = response.data.trim();
+
+            if (!proxy || !proxy.includes(':')) {
+                throw new Error('获取到的代理格式无效，必须返回：IP:PORT的txt格式');
+            }
+
+            console.log(`🔍 账号[${index + 1}]: 获取到代理: ${proxy}，正在测试连接性...`);
+
+
+            const isProxyValid = await testProxyConnection(proxy);
+
+            if (isProxyValid) {
+                console.log(`账号[${index + 1}]: ✅ 代理测试通过`);
+                return proxy;
+            } else {
+                console.warn(`账号[${index + 1}]: ⚠️ 代理测试失败，将重新获取`);
+                throw new Error('代理测试失败');
+            }
+
         } catch (error) {
             lastError = error;
-            console.error(`账号[${index + 1}]：🔐 获取代理失败，正在重试...`);
 
-            if (attempt < retries) {
-                // 等待一段时间再重试（可选）
-                await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+            retries++;
+
+            if (retries < maxRetries) {
+                // 指数退避策略
+                const delay = Math.min(3000 * Math.pow(2, retries - 1), 30000);
+                console.log(`账号[${index + 1}]: 🕐 ${delay / 1000}秒后重试...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
     }
-    console.error(`账号[${index + 1}]：获取代理失败，已重试${retries}次❌`);
+
+    console.error(`账号[${index + 1}]: ❌ 获取有效代理失败，已重试${maxRetries}次 `);
     return '';
 }
 
+
+async function getSignByAPI(path, data = {}, maxRetries = 3) {
+    const url = process.env['wqwl_sign_api'] || 'http://paid.wqwlkj.cn' + path;
+    const config = {
+        method: 'POST',
+        url: url,
+        data: data
+    };
+
+    let retries = 0;
+    let lastError = '';
+
+    while (retries < maxRetries) {
+        try {
+
+            // 获取sign
+            const response = await axios(config);
+            signs = response.data;
+            if (signs.code != 200)
+                throw new Error('获取sign失败，接口返回：' + signs.msg || '未知错误');
+            return signs.data;
+        } catch (error) {
+            lastError = error.message;
+
+            retries++;
+
+            if (retries < maxRetries) {
+                // 指数退避策略
+                const delay = Math.min(3000 * Math.pow(2, retries - 1), 30000);
+                console.log(`❌ 获取sign失败，${delay / 1000}秒后重试...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+    console.error(`❌ 获取sign失败，已重试${maxRetries}次 ,脚本即将退出...`);
+    return false;
+}
 
 // 固定存储目录
 const DATA_DIR = path.resolve(__dirname, 'wqwl_data');
@@ -577,11 +752,14 @@ class WQWLBase {
         this.isNeedFile = isNeedFile || false;
         this.proxyUrl = proxy || process.env["wqwl_daili"] || '';
         this.isProxy = isProxy || process.env["wqwl_useProxy"] || false;
-        this.bfs = bfs || process.env["wqwl_bfs"] || 4;
+
+        let bfsValue = bfs || process.env["wqwl_bfs"] || 4;
+        this.bfs = Number(bfsValue);
         this.isNotify = isNotify || process.env["wqwl_isNotify"] || true;
         this.isDebug = isDebug || process.env["wqwl_isDebug"] || false;
         this.index = 0;
         this.sendText = ''
+        this._sendTextTruncated = false;
         this.lock = false;//发消息的锁，没法了
         this.isNeedTimes = isNeedTimes;
         this.statistic = new WQWLStatistic(scriptName);
@@ -606,7 +784,6 @@ class WQWLBase {
             return false;
         }
     }
-
     async runTasks(TaskClass) {
         if (!await this.initFramework()) return;
 
@@ -623,65 +800,135 @@ class WQWLBase {
 
         console.log(`🚀 ${this.scriptName}开始执行...`);
         const tokens = this.wqwlkj.checkEnv(process.env[this.ckName]);
-        const totalBatches = Math.ceil(tokens.length / this.bfs);
-        //重置统计
+
+        // 修复：固定token数组长度，防止循环中被修改
+        const fixedTokens = [...tokens];
+
+        // 重置统计和索引
         await this.statistic.reset();
-        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-            const start = batchIndex * this.bfs;
-            const end = start + this.bfs;
-            const batch = tokens.slice(start, end);
 
-            console.log(`▶️ 开始执行第 ${batchIndex + 1} 批任务 (${start + 1}-${Math.min(end, tokens.length)})`);
+        const concurrency = this.bfs; // 并发数
+        let currentIndex = 0;
+        let activeCount = 0;
+        const totalTasks = fixedTokens.length;
 
-            const taskInstances = batch.map(token => new TaskClass(token, this.index++, this));
-            const tasks = taskInstances.map(instance => instance.main());
-            const results = await Promise.allSettled(tasks);
+        console.log(`🚀 启动动态并发池，并发数: ${concurrency}, 总任务数: ${totalTasks}`);
 
-            results.forEach((result, index) => {
-                const task = taskInstances[index];
-                if (result.status === 'rejected') {
-                    task.sendMessage(result.reason);
+        // 用于等待所有任务完成的Promise
+        let resolveAllDone;
+        const allDonePromise = new Promise((resolve) => {
+            resolveAllDone = resolve;
+        });
+
+        let completedCount = 0;
+        let scheduleNextTask;
+
+        // 心跳日志：长跑时确认脚本还活着，并监控内存
+        const heartbeatTimer = setInterval(() => {
+            const mem = process.memoryUsage();
+            const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
+            const rssMB = Math.round(mem.rss / 1024 / 1024);
+            console.log(`💓 心跳 | 进度 ${completedCount}/${totalTasks} | 活跃 ${activeCount}/${concurrency} | 内存 heap=${heapMB}MB rss=${rssMB}MB`);
+        }, 5 * 60 * 1000);
+
+        // 执行单个任务的函数
+        const runTask = async (taskIndex) => {
+            activeCount++;
+            const token = fixedTokens[taskIndex];
+            const instance = new TaskClass(token, taskIndex, this);
+
+            console.log(`🎬 [${taskIndex + 1}/${totalTasks}] 开始执行，当前并发: ${activeCount}/${concurrency}`);
+
+            try {
+                await instance.main();
+                console.log(`✅ [${taskIndex + 1}/${totalTasks}] 执行成功`);
+            } catch (error) {
+                console.error(`❌ [${taskIndex + 1}/${totalTasks}] 执行失败:`, error.message);
+                if (instance.sendMessage) {
+                    try {
+                        instance.sendMessage(String(error.message || error));
+                    } catch (_) { /* ignore */ }
+                }
+            } finally {
+                activeCount--;
+                completedCount++;
+
+                // 检查统计队列
+                const pendingCount = this.statistic.getPendingCount();
+                if (pendingCount > 100) {
+                    console.log(`⏳ 统计队列中有 ${pendingCount} 个任务，等待清理...`);
+                    await this.statistic.waitForAll();
+                }
+
+                // 启动下一个任务
+                if (currentIndex < totalTasks) {
+                    const nextIndex = currentIndex++;
+                    scheduleNextTask(nextIndex);
+                } else if (completedCount === totalTasks) {
+                    resolveAllDone();
+                }
+            }
+        };
+
+        // 调度下一个任务，必须 catch 防止 fire-and-forget 的 unhandledRejection
+        scheduleNextTask = (nextIndex) => {
+            runTask(nextIndex).catch((err) => {
+                console.error(`❌ [${nextIndex + 1}/${totalTasks}] 任务调度异常:`, err.message || err);
+                // finally 块若抛错，此处仅补救调度，不再重复计数
+                try {
+                    if (currentIndex < totalTasks) {
+                        scheduleNextTask(currentIndex++);
+                    } else if (completedCount >= totalTasks) {
+                        resolveAllDone();
+                    }
+                } catch (recoverErr) {
+                    console.error('❌ 补救调度失败:', recoverErr.message || recoverErr);
                 }
             });
+        };
 
-            // 检查当前统计队列情况
-            const pendingCount = this.statistic.getPendingCount();
-            if (pendingCount > 100) {
-                console.log(`⏳ 统计队列中有 ${pendingCount} 个任务，等待清理...`);
-                await this.statistic.waitForAll();
+        try {
+            // 启动初始并发任务
+            for (let i = 0; i < Math.min(concurrency, totalTasks); i++) {
+                scheduleNextTask(currentIndex++);
             }
 
-            await this.wqwlkj.sleep(this.wqwlkj.getRandom(3, 5));
+            // 等待所有任务完成
+            await allDonePromise;
+        } finally {
+            clearInterval(heartbeatTimer);
         }
-        if (this.fileData)
-            this.wqwlkj.saveFile(this.fileData, this.scriptName)
+
+        // ========== 原有推送逻辑，完全没动 ==========
+        if (this.fileData) {
+            this.wqwlkj.saveFile(this.fileData, this.scriptName);
+        }
+
         console.log(`🎉 ${this.scriptName}全部任务已完成！`);
-        // 等待所有统计操作完成
         console.log('⏳ 等待所有统计操作完成...');
         await this.statistic.waitForAll();
 
         const statsOutput = await this.statistic.formatOutput();
 
         if (this.sendText !== '' && this.isNotify === true && notify) {
-            let message = this.formatAccountLogs(this.sendText)
-            console.log(`\n推送消息汇总：\n`)
+            let message = this.formatAccountLogs(this.sendText);
+            console.log(`\n推送消息汇总：\n`);
             if (statsOutput) {
                 if (this.isNeedDetailed) {
-                    message = `${statsOutput}\n${message}`
+                    message = `${statsOutput}\n${message}`;
                 } else {
-                    console.log(statsOutput)
+                    console.log(statsOutput);
                 }
             }
-            console.log(message)
+            console.log(message);
             await notify.sendNotify(`${this.scriptName} `, `${message} `);
         }
         else if (statsOutput && this.sendText === '' && this.isNotify === true && notify) {
-            // 如果没有其他消息，只推送统计结果
             console.log('📊 无详细消息，仅推送统计结果');
             await notify.sendNotify(`${this.scriptName} - 执行统计结果`, `${statsOutput}`);
         }
         else {
-            console.log('⚠️ 未开启推送或者无消息可推送')
+            console.log('⚠️ 未开启推送或者无消息可推送');
         }
     }
     async sendMessage(msg, isPush = false) {
@@ -695,8 +942,12 @@ class WQWLBase {
             if (this.isNeedTimes)
                 msg = `[${this.getDateDetail()}] ${msg}`
             if (isPush) {
-                //console.log("本消息进行推送");
-                this.sendText += msg + "\n";
+                if (this.sendText.length < MAX_SEND_TEXT_LENGTH) {
+                    this.sendText += msg + "\n";
+                } else if (!this._sendTextTruncated) {
+                    this._sendTextTruncated = true;
+                    console.log('⚠️ 推送消息累积过长，已停止写入（防止内存溢出）');
+                }
                 msg = `${msg} 🚀[push]`
                 //console.log(`[DEBUG] 调用后sendText: "${this.sendText}"`);
             }
@@ -784,7 +1035,6 @@ class WQWLBaseTask {
         this.scheduleResults = [];
     }
 
-    格式化结果方法
     formatResult(result) {
         if (result === null || result === undefined) {
             return result === null ? 'null' : 'undefined';
@@ -1508,5 +1758,6 @@ module.exports = {
     newFindTypes: newFindTypes, //新版寻找分类
     WQWLBase: WQWLBase, // 基础模板类
     WQWLBaseTask: WQWLBaseTask, //基础任务类
-    randomUAAlipay: randomUAAlipay //随机支付宝ua
+    randomUAAlipay: randomUAAlipay, //随机支付宝ua,
+    getSignByAPI: getSignByAPI,//获取加密项
 };
