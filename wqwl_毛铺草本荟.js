@@ -86,22 +86,75 @@ const name = '微信小程序毛铺草本荟'
                 this.maxRetries = 3; // 最大重试次数
                 this.retryDelay = 3; // 重试延迟(秒)
 
-                //活动列表
-                this.activityConfig = {
-                    lab: {
-                        startUrl: '/BlzLonglActivity/caobenshiyanshiUserDrawGet',
-                        endUrl: '/BlzLonglActivity/caobenshiyanshiUserDraws',
-                        mainUrl: '/BlzLonglActivity/caobenshiyanshiUserMains',
-                        name: '实验室'
+
+                /*
+                                //活动列表
+                                this.activityConfig = {
+                                    lab: {
+                                        startUrl: '/BlzLonglActivity/caobenshiyanshiUserDrawGet',
+                                        endUrl: '/BlzLonglActivity/caobenshiyanshiUserDraws',
+                                        mainUrl: '/BlzLonglActivity/caobenshiyanshiUserMains',
+                                        name: '实验室'
+                                    },
+                                    herb: {
+                                        startUrl: '/BlzLonglActivity/shicaoxunyuanUserDrawGet',
+                                        endUrl: '/BlzLonglActivity/shicaoxunyuanUserDraws',
+                                        mainUrl: '/BlzLonglActivity/shicaoxunyuanUserMains',
+                                        name: '分药材'
+                                    },
+                                {
+                                    name: '代谢研究所',
+                                        label: 'daixieyanjiusuo'
+                                }
+                                // 添加新活动只需在这里新增配置即可
+                            };
+                
+                */
+
+
+                this.activityConfig = [
+
+                    {
+                        name: '代谢研究所',
+                        label: 'daixieyanjiusuo'
                     },
-                    herb: {
-                        startUrl: '/BlzLonglActivity/shicaoxunyuanUserDrawGet',
-                        endUrl: '/BlzLonglActivity/shicaoxunyuanUserDraws',
-                        mainUrl: '/BlzLonglActivity/shicaoxunyuanUserMains',
-                        name: '分药材'
+                    {
+                        name: '草本实验室',
+                        label: 'caobenshiyanshi'
+                    },
+                    {
+                        name: '识草寻源',
+                        label: 'shicaoxunyuan'
                     }
-                    // 添加新活动只需在这里新增配置即可
-                };
+                ]
+
+                //草本寻轻记配置
+                //春
+                this.cbxqjConfig = [{
+                    name: '春·万物清醒',
+                    label: 'qingxing'
+                },
+                {
+                    name: '春·春野探秘',
+                    label: 'chunye'
+                }
+                ]
+
+                //夏
+                this.xiaConfig = [
+                    {
+                        name: '美食配对-线上常规版',
+                        activity_id: 100000
+                    },
+                    {
+                        name: '解救草本',
+                        activity_id: 101030
+                    },
+                    {
+                        name: '夏日轻松足球赛',
+                        activity_id: 100014
+                    },
+                ]
             }
 
             async init(ck) {
@@ -151,6 +204,175 @@ const name = '微信小程序毛铺草本荟'
                 }
             }
 
+            //草本寻轻记
+            async cbxqjStart(name, label) {
+                try {
+                    if (!(this.auth))
+                        return;
+                    const data = {}
+                    const headers = this.getAppSign(data, ['activity_code', 'city']);
+                    const options = {
+                        url: `${this.baseURL}/BlzLongcaobenActivity/${label}UserMains`,
+                        headers: headers,
+                        method: 'POST',
+                        data: data
+                    };
+
+                    const result = await this.request(options, 0);
+                    // console.log(JSON.stringify(result))
+                    if (result?.code !== 0)
+                        return this.sendMessage(`${name} 获取次数失败，原因：${result.message}`);
+
+
+                    if (result?.data?.activity_status === "Can" && result?.data?.activity?.activity_id) {
+                        this.sendMessage(`开始${name} ...`)
+
+                        const data2 = { "activity_id": result?.data?.activity?.activity_id };
+                        const headers2 = this.getAppSign(data, ['activity_id']);
+                        const options2 = {
+                            url: `${this.baseURL}/BlzLongcaobenActivity/${label}UserStarts`,
+                            headers: headers2,
+                            method: 'POST',
+                            data: data2
+                        };
+
+                        const result2 = await this.request(options2, 0);
+                        await this.request(options, 0);
+                        if (result2?.code !== 0)
+                            return this.sendMessage(`${name} 获取信息失败，原因：${result2.message}`);
+                        const data3 = { "activity_id": result?.data?.activity?.activity_id, "play_finish_is": -1 };
+                        const headers3 = this.getAppSign(data, ['activity_id', 'play_finish_is']);
+                        const options3 = {
+                            url: `${this.baseURL}/BlzLongcaobenActivity/${label}UserDrawGet`,
+                            headers: headers3,
+                            method: 'POST',
+                            data: data3
+                        };
+
+                        const result3 = await this.request(options3, 0);
+                        if (result3?.code !== 0)
+                            return this.sendMessage(`${name} 开始失败，原因：${result3.message}`);
+                        await wqwlkj.sleep(wqwlkj.getRandom(3, 15))
+                        if (result3?.data?.user_record_id) {
+                            this.sendMessage(`获取到游戏记录id：${result3?.data?.user_record_id}`)
+                            const data4 = { "user_record_id": result3?.data?.user_record_id };
+                            const headers4 = this.getAppSign(data, ['user_record_id']);
+                            const options4 = {
+                                url: `${this.baseURL}/BlzLongcaobenActivity/${label}UserDraws`,
+                                headers: headers4,
+                                method: 'POST',
+                                data: data4
+                            };
+
+                            const result4 = await this.request(options4, 0);
+                            if (result4?.code !== 0)
+                                return this.sendMessage(`${name} 结束失败，原因：${result4.message}`);
+                            this.sendMessage(`✅${name} 成功，获得${result4?.data?.award?.AwardName || result4?.data?.awardLocal?.title || '未识别'}`, true);
+
+                        }
+                        else {
+                            this.sendMessage(`❌${name} user_record_id获取失败`)
+                        }
+
+                    }
+                    else {
+                        this.sendMessage(`${name} 没次数啦`)
+                    }
+                } catch (e) {
+                    throw new Error(`❌ ${name} 请求接口失败，${e.message}`);
+                }
+            }
+
+            //草本寻轻记·夏
+            async xiaStart(name, activity_id) {
+                try {
+                    if (!(this.auth))
+                        return;
+                    const data = { "activity_id": activity_id }
+                    const headers = this.getAppSign(data, ['activity_code', 'city']);
+                    const options = {
+                        url: `${this.baseURL}/opactivity/ccncommon/activityDetails`,
+                        headers: headers,
+                        method: 'POST',
+                        data: data
+                    };
+
+                    const result = await this.request(options, 0);
+                    // console.log(JSON.stringify(result))
+                    if (result?.code !== 0)
+                        return this.sendMessage(`${name} 获取次数失败，原因：${result.message}`);
+
+
+
+                    this.sendMessage(`开始${name} ...`)
+
+                    const data2 = { "activity_id": result?.data?.activity?.activity_id, "latitude": "", "longitude": "" };
+                    const headers2 = this.getAppSign(data, ['activity_id']);
+                    const options2 = {
+                        url: `${this.baseURL}/opactivity/ccncommon/dateUserMains`,
+                        headers: headers2,
+                        method: 'POST',
+                        data: data2
+                    };
+
+                    const result2 = await this.request(options2, 0);
+                    if (result2?.data?.activity_status === "Can" && result2?.data?.activity?.activity_id) {
+                        if (result2?.code !== 0)
+                            return this.sendMessage(`${name} 获取信息失败，原因：${result2.message}`);
+                        const data3 = { "activity_id": result?.data?.activity?.activity_id };
+                        const headers3 = this.getAppSign(data, ['activity_id', 'play_finish_is']);
+                        const options3 = {
+                            url: `${this.baseURL}/opactivity/ccncommon/userStarts`,
+                            headers: headers3,
+                            method: 'POST',
+                            data: data3
+                        };
+
+                        const result3 = await this.request(options3, 0);
+                        if (result3?.code !== 0)
+                            return this.sendMessage(`${name} 开始失败，原因：${result3.message}`);
+                        await wqwlkj.sleep(wqwlkj.getRandom(3, 15))
+                        const data33 = { "activity_id": activity_id, "latitude": "", "longitude": "", "province": "", "city": "", "district": "", "play_data_json": "", "play_finish_is": 1 }
+                        const options33 = {
+                            url: `${this.baseURL}/opactivity/ccncommon/userFinishs`,
+                            headers: headers3,
+                            method: 'POST',
+                            data: data33
+                        };
+                        const result33 = await this.request(options33, 0);
+                        if (result33?.code !== 0)
+                            return this.sendMessage(`${name} 结束失败，原因：${result3.message}`);
+                        if (result33?.data?.user_play_id) {
+                            this.sendMessage(`获取到游戏记录id：${result33?.data?.user_play_id}`)
+                            const data4 = { "activity_id": activity_id, "user_play_id": result33?.data?.user_play_id, "year": result33?.data?.user_record_year };
+                            const headers4 = this.getAppSign(data, ['activity_id', 'user_play_id']);
+                            const options4 = {
+                                url: `${this.baseURL}/opactivity/ccncommon/datelUserDraws`,
+                                headers: headers4,
+                                method: 'POST',
+                                data: data4
+                            };
+
+                            const result4 = await this.request(options4, 0);
+                            if (result4?.code !== 0)
+                                return this.sendMessage(`${name} 结束失败，原因：${result4.message}`);
+                            this.sendMessage(`✅${name} 成功，获得${result4?.data?.award?.AwardName || result4?.data?.awardLocal?.title || '未识别'}`, true);
+
+                        }
+                        else {
+                            this.sendMessage(`❌${name} user_play_id获取失败`)
+                        }
+
+                    }
+                    else {
+                        this.sendMessage(`❌${name} 今天没次数啦`)
+                    }
+                } catch (e) {
+                    throw new Error(`❌${name} 请求接口失败，${e.message}`);
+                }
+            }
+
+            /** 
             //谁是5冕之王
             async wumianStart() {
                 try {
@@ -229,7 +451,7 @@ const name = '微信小程序毛铺草本荟'
                 } catch (e) {
                     throw new Error(`❌谁是5冕之王请求接口失败，${e.message}`);
                 }
-            }
+            }*/
 
             //周五专属
             async memberdayStart() {
@@ -291,6 +513,65 @@ const name = '微信小程序毛铺草本荟'
                 // 8:00 = 480分钟, 22:00 = 1320分钟
                 return totalMinutes >= 480 && totalMinutes <= 1320;
             }
+
+
+            async commonStart(name, label) {
+                try {
+                    if (!(this.auth))
+                        return;
+                    const BASEURL = 'https://mpb.jingjiu.com/proxy-he/worker/api'
+                    //1.查看活动次数
+                    const data = {};
+                    const headers = this.getAppSign(data, []);
+                    const options = {
+                        url: `${BASEURL}/BlzLonglActivity/${label}UserMains`,
+                        headers: headers,
+                        method: 'POST',
+                        data: data
+                    };
+                    this.sendMessage(`开始 ${name}...`)
+                    const result = await this.request(options, 0);
+                    if (result.code !== 0)
+                        return this.sendMessage(`查看活动次数失败：${result.message}`);
+
+                    if (result.data.today_play_num_can <= 0) {
+                        return this.sendMessage(`${name} 没次数啦`)
+                    }
+                    //2.开始活动
+                    const data1 = { "activity_id": result?.data?.activity?.activity_id + '', "play_time_start": Math.round(Date.now() / 1000) }
+                    const headers1 = this.getAppSign(data1, ['activity_id', 'play_time_start']);
+                    const options1 = {
+                        url: `${BASEURL}/BlzLonglActivity/${label}UserDrawGet`,
+                        headers: headers1,
+                        method: 'POST',
+                        data: data1
+                    };
+                    //console.log(JSON.stringify(options1))
+                    const result1 = await this.request(options1, 0);
+                    if (result1.code !== 0 || !result1?.data?.user_record_id)
+                        return this.sendMessage(`开始活动失败：${result1.message}`);
+                    //3.结束活动
+                    await wqwlkj.sleep(wqwlkj.getRandom(3, 15))
+                    const data2 = { "activity_id": result?.data?.activity?.activity_id + '', "play_time_finish": Math.round(Date.now() / 1000), "user_record_id": result1?.data?.user_record_id }
+                    const headers2 = this.getAppSign(data2, ['activity_id', 'play_time_finish', 'user_record_id']);
+                    const options2 = {
+                        url: `${BASEURL}/BlzLonglActivity/${label}UserDraws`,
+                        headers: headers2,
+                        method: 'POST',
+                        data: data2
+                    };
+
+                    const result2 = await this.request(options2, 0);
+                    if (result2.code !== 0)
+                        return this.sendMessage(`结束活动失败：${result2.message}`);
+
+                    this.sendMessage(`✅ ${name}成功，获得${result2.data.title || result2.data.awardLocal.title || '识别失败了'}`, true);
+
+                } catch (e) {
+                    throw new Error(`❌ 请求接口过程发生异常，${e.message}`);
+                }
+            }
+            /**
             // 通用次数查询函数
             async commonUserMains(activityType) {
                 try {
@@ -389,6 +670,7 @@ const name = '微信小程序毛铺草本荟'
                     throw new Error(`❌请求${this.activityConfig[activityType]?.name || activityType}结束接口失败，${e.message}`);
                 }
             }
+            */
             //观看视频
             async taskViewVideoView() {
                 try {
@@ -481,7 +763,9 @@ const name = '微信小程序毛铺草本荟'
                     }
                 });
                 c = a + c + i + s;
-                //console.log(c)
+                // console.log(c)
+                //apptime: a,
+                //appsign: wqwlkj.md5(c, true).substr(-10),
                 var r = {
                     'User-Agent': this.ua,
                     "accept": "*/*",
@@ -495,7 +779,7 @@ const name = '微信小程序毛铺草本荟'
                     "sec-fetch-site": "cross-site",
                     "x-version": "0.0.1",
                     "xweb_xhr": "1",
-                    "Referer": "https://servicewechat.com/wxefd0fe341e06b815/508/page-frame.html",
+                    "Referer": "https://servicewechat.com/wxefd0fe341e06b815/752/page-frame.html",
                     "Referrer-Policy": "unsafe-url"
                 };
                 return r;
@@ -515,34 +799,48 @@ const name = '微信小程序毛铺草本荟'
                 await wqwlkj.sleep(wqwlkj.getRandom(3, 5))
                 this.sendMessage(`开始签到...`)
                 const result = await this.sign()
-                if (result == '' || result == null || result == undefined || result === '授权过期')
+                if (result === '授权过期')
                     return this.sendMessage('❌授权已过期或ck无效，请重新获取', true)
                 await wqwlkj.sleep(wqwlkj.getRandom(3, 5))
-                await this.wumianStart()
-                // 遍历所有配置的活动
-                for (const [activityType, config] of Object.entries(this.activityConfig)) {
-                    this.sendMessage(`开始${config.name}游戏...`);
-
-                    // 查询剩余次数
-                    const times = await this.commonUserMains(activityType);
-
-                    if (times > 0) {
-                        // 开始活动
-                        const recordId = await this.commonDrawGet(activityType);
-
-                        if (recordId) {
-                            // 随机等待时间
-                            const delay = wqwlkj.getRandom(30, 40);
-                            await wqwlkj.sleep(delay);
-
-                            // 结束活动
-                            await this.commonDraws(activityType, recordId);
-                        }
-                    }
-
-                    // 活动间间隔
+                for (const act of this.activityConfig) {
+                    await this.commonStart(act.name, act.label)
                     await wqwlkj.sleep(wqwlkj.getRandom(3, 5));
                 }
+                for (const act of this.xiaConfig) {
+                    await this.xiaStart(act.name, act.activity_id)
+                    await wqwlkj.sleep(wqwlkj.getRandom(3, 5));
+                }
+                for (const act of this.cbxqjConfig) {
+                    await this.cbxqjStart(act.name, act.label)
+                    await wqwlkj.sleep(wqwlkj.getRandom(3, 5));
+                }
+
+                /*
+                 await this.wumianStart()
+                 // 遍历所有配置的活动
+                 for (const [activityType, config] of Object.entries(this.activityConfig)) {
+                     this.sendMessage(`开始${config.name}游戏...`);
+         
+                     // 查询剩余次数
+                     const times = await this.commonUserMains(activityType);
+         
+                     if (times > 0) {
+                         // 开始活动
+                         const recordId = await this.commonDrawGet(activityType);
+         
+                         if (recordId) {
+                             // 随机等待时间
+                             const delay = wqwlkj.getRandom(30, 40);
+                             await wqwlkj.sleep(delay);
+         
+                             // 结束活动
+                             await this.commonDraws(activityType, recordId);
+                         }
+                     }
+         
+                     // 活动间间隔
+                     await wqwlkj.sleep(wqwlkj.getRandom(3, 5));
+                 }*/
 
                 this.sendMessage(`开始观看视频`)
                 await this.taskViewVideoView()
