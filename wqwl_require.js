@@ -12,6 +12,95 @@ const DEFAULT_REQUEST_TIMEOUT = Number(process.env['wqwl_request_timeout']) || 3
 // 推送消息最大累积长度，防止几百号长跑时内存溢出被系统静默 kill
 const MAX_SEND_TEXT_LENGTH = 3 * 1024 * 1024;
 
+class YybApiError extends Error {
+    constructor(message, details = {}) {
+        super(message);
+        this.name = 'YybApiError';
+        this.status = details.status ?? null;
+        this.code = details.code ?? null;
+        this.body = details.body ?? null;
+    }
+}
+
+class YybClient {
+    constructor({ baseUrl, apiToken, timeoutMs = 30000, fetchImpl = globalThis.fetch } = {}) {
+        if (!baseUrl) throw new TypeError('必须配置 YYB 服务地址');
+        if (typeof fetchImpl !== 'function') throw new TypeError('需要 Node.js 18 及以上版本，或传入 fetch 实现');
+        this.baseUrl = baseUrl.replace(/\/+$/, '');
+        this.apiToken = apiToken ? String(apiToken).trim() : '';
+        this.timeoutMs = timeoutMs;
+        this.fetch = fetchImpl;
+    }
+
+    async request(pathname, { method = 'GET', body, signal } = {}) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+        const abort = () => controller.abort();
+        if (signal) {
+            if (signal.aborted) controller.abort();
+            else signal.addEventListener('abort', abort, { once: true });
+        }
+        try {
+            const headers = { Accept: 'application/json' };
+            if (this.apiToken) headers.Authorization = `Bearer ${this.apiToken}`;
+            const options = { method, headers, signal: controller.signal };
+            if (body !== undefined) {
+                headers['Content-Type'] = 'application/json';
+                options.body = JSON.stringify(body);
+            }
+            const response = await this.fetch(`${this.baseUrl}${pathname}`, options);
+            const text = await response.text();
+            let payload;
+            try {
+                payload = text ? JSON.parse(text) : null;
+            } catch {
+                throw new YybApiError(`YYB接口返回的不是有效JSON（HTTP ${response.status}）`, { status: response.status, body: text });
+            }
+            if (!response.ok) {
+                throw new YybApiError(payload?.msg || `YYB接口请求失败（HTTP ${response.status}）`, {
+                    status: response.status,
+                    code: payload?.code,
+                    body: payload,
+                });
+            }
+            if (!payload || payload.code !== 0) {
+                throw new YybApiError(payload?.msg || 'YYB接口返回错误', {
+                    status: response.status,
+                    code: payload?.code,
+                    body: payload,
+                });
+            }
+            return payload.data;
+        } finally {
+            clearTimeout(timeout);
+            signal?.removeEventListener('abort', abort);
+        }
+    }
+
+    async getAccounts({ signal } = {}) {
+        const accounts = await this.request('/accounts', { signal });
+        if (!Array.isArray(accounts)) throw new YybApiError('YYB账号接口返回的数据格式无效', { body: accounts });
+        return accounts;
+    }
+
+    async getCode({ ref, appId, signal } = {}) {
+        if (ref === undefined || ref === null || String(ref).trim() === '') throw new TypeError('必须提供YYB账号编号');
+        if (!appId || String(appId).trim() === '') throw new TypeError('必须提供小程序AppID');
+        return this.request('/wxapp/getCode', {
+            method: 'POST',
+            body: { ref: String(ref), app_id: appId },
+            signal,
+        });
+    }
+
+    static extractCode(data) {
+        if (typeof data?.result === 'string') return data.result;
+        if (typeof data?.result?.code === 'string') return data.result.code;
+        if (typeof data?.code === 'string') return data.code;
+        return null;
+    }
+}
+
 // 复用 Agent，避免每次请求 new Agent 导致连接/内存泄漏
 let _sharedHttpAgent = null;
 let _sharedHttpsAgent = null;
@@ -1760,4 +1849,6 @@ module.exports = {
     WQWLBaseTask: WQWLBaseTask, //基础任务类
     randomUAAlipay: randomUAAlipay, //随机支付宝ua,
     getSignByAPI: getSignByAPI,//获取加密项
+    YybApiError: YybApiError,
+    YybClient: YybClient,
 };
